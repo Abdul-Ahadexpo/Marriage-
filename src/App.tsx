@@ -7,6 +7,7 @@ import type { Room, User } from './types';
 
 function App() {
   const [roomId, setRoomId] = useState('');
+  const [joinRoomId, setJoinRoomId] = useState('');
   const [name, setName] = useState('');
   const [gender, setGender] = useState('');
   const [role, setRole] = useState('participant');
@@ -16,9 +17,11 @@ function App() {
 
   useEffect(() => {
     if (roomId) {
+      console.log('Attempting to connect to room:', roomId);
       const roomRef = ref(database, `rooms/${roomId}`);
       const unsubscribe = onValue(roomRef, (snapshot) => {
         const data = snapshot.val();
+        console.log('Room data update:', data);
         if (data) {
           setRoom(data);
           // Check if both users have completed their Kabul
@@ -26,71 +29,126 @@ function App() {
           if (users.length === 2 && users.every(user => user.kabulCount === 3)) {
             setShowCongrats(true);
             // Mark room as completed
-            set(ref(database, `rooms/${roomId}/isCompleted`), true);
+            set(ref(database, `rooms/${roomId}/isCompleted`), true)
+              .catch(error => {
+                console.error('Error marking room as completed:', error);
+              });
           }
+        } else {
+          console.log('No data found for room:', roomId);
         }
+      }, (error) => {
+        console.error('Error subscribing to room updates:', error);
+        setError('Failed to connect to room: ' + error.message);
       });
 
-      return () => unsubscribe();
+      return () => {
+        console.log('Unsubscribing from room:', roomId);
+        unsubscribe();
+      };
     }
   }, [roomId]);
 
-  const createOrJoinRoom = async () => {
-    if (!name || !gender || !role) {
-      setError('Please enter all required information');
-      return;
+  const createRoom = async () => {
+    try {
+      if (!name || !gender) {
+        setError('Please enter your name and gender');
+        return;
+      }
+
+      const newRoomId = uuidv4();
+      console.log('Creating new room:', newRoomId);
+
+      const newUser: User = { name, gender, kabulCount: 0 };
+      const newRoom = {
+        id: newRoomId,
+        users: {
+          [uuidv4()]: newUser
+        },
+        witnessCount: 0
+      };
+
+      const roomRef = ref(database, `rooms/${newRoomId}`);
+      await set(roomRef, newRoom);
+      console.log('Room created successfully:', newRoomId);
+      setRoomId(newRoomId);
+      setError('');
+    } catch (error) {
+      console.error('Error creating room:', error);
+      setError('Failed to create room: ' + (error as Error).message);
     }
+  };
 
-    let targetRoomId = roomId;
-    if (!targetRoomId) {
-      targetRoomId = uuidv4();
-    }
+  const joinRoom = async () => {
+    try {
+      if (!name || !gender || !joinRoomId) {
+        setError('Please enter all required information');
+        return;
+      }
 
-    const roomRef = ref(database, `rooms/${targetRoomId}`);
-    const snapshot = await get(roomRef);
-    const currentRoom = snapshot.val();
+      console.log('Attempting to join room:', joinRoomId);
+      const roomRef = ref(database, `rooms/${joinRoomId}`);
+      const snapshot = await get(roomRef);
+      const currentRoom = snapshot.val();
 
-    if (role === 'witness') {
       if (!currentRoom) {
+        console.error('Room not found:', joinRoomId);
         setError('Room not found');
         return;
       }
-      
-      await set(ref(database, `rooms/${targetRoomId}/witnessCount`), (currentRoom.witnessCount || 0) + 1);
-      setRoomId(targetRoomId);
+
+      if (role === 'witness') {
+        console.log('Joining as witness');
+        await set(ref(database, `rooms/${joinRoomId}/witnessCount`), (currentRoom.witnessCount || 0) + 1);
+        setRoomId(joinRoomId);
+        setError('');
+        return;
+      }
+
+      if (Object.keys(currentRoom.users || {}).length >= 2) {
+        console.error('Room is full:', joinRoomId);
+        setError('Room is full');
+        return;
+      }
+
+      const newUser: User = { name, gender, kabulCount: 0 };
+      const updatedRoom = {
+        ...currentRoom,
+        users: {
+          ...currentRoom.users,
+          [uuidv4()]: newUser
+        }
+      };
+
+      await set(roomRef, updatedRoom);
+      console.log('Successfully joined room:', joinRoomId);
+      setRoomId(joinRoomId);
       setError('');
-      return;
+    } catch (error) {
+      console.error('Error joining room:', error);
+      setError('Failed to join room: ' + (error as Error).message);
     }
-
-    if (currentRoom && Object.keys(currentRoom.users || {}).length >= 2) {
-      setError('Room is full');
-      return;
-    }
-
-    const newUser: User = { name, gender, kabulCount: 0 };
-    const updatedRoom = {
-      id: targetRoomId,
-      users: {
-        ...(currentRoom?.users || {}),
-        [uuidv4()]: newUser
-      },
-      witnessCount: currentRoom?.witnessCount || 0
-    };
-
-    await set(roomRef, updatedRoom);
-    setRoomId(targetRoomId);
-    setError('');
   };
 
   const sayKabul = async (userId: string) => {
-    if (!room || !roomId) return;
-    
-    const currentCount = room.users[userId].kabulCount || 0;
-    const userRef = ref(database, `rooms/${roomId}/users/${userId}`);
-    await set(userRef, {
-      ...room.users[userId],
-      kabulCount: currentCount + 1
-    });
+    try {
+      if (!room || !roomId) {
+        console.error('No room data available');
+        return;
+      }
+      
+      console.log('Saying Kabul for user:', userId);
+      const currentCount = room.users[userId].kabulCount || 0;
+      const userRef = ref(database, `rooms/${roomId}/users/${userId}`);
+      await set(userRef, {
+        ...room.users[userId],
+        kabulCount: currentCount + 1
+      });
+      console.log('Kabul count updated successfully');
+    } catch (error) {
+      console.error('Error updating Kabul count:', error);
+      setError('Failed to update Kabul: ' + (error as Error).message);
+    }
   };
 
   const renderNikahScreen = () => {
@@ -202,25 +260,39 @@ function App() {
                   <option value="participant">Participant</option>
                   <option value="witness">Witness</option>
                 </select>
-                <input
-                  type="text"
-                  placeholder="Enter room ID (optional for joining)"
-                  onChange={(e) => setRoomId(e.target.value)}
-                  className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
-                />
+
+                <div className="flex gap-4">
+                  <div className="flex-1">
+                    <button
+                      onClick={createRoom}
+                      className="w-full bg-emerald-600 text-white py-3 rounded-lg hover:bg-emerald-700 transition-colors flex items-center justify-center space-x-2"
+                    >
+                      <Users className="w-5 h-5" />
+                      <span>Create New Room</span>
+                    </button>
+                  </div>
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      placeholder="Enter room ID to join"
+                      value={joinRoomId}
+                      onChange={(e) => setJoinRoomId(e.target.value)}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent mb-2"
+                    />
+                    <button
+                      onClick={joinRoom}
+                      className="w-full bg-emerald-600 text-white py-3 rounded-lg hover:bg-emerald-700 transition-colors flex items-center justify-center space-x-2"
+                    >
+                      <Users className="w-5 h-5" />
+                      <span>Join Room</span>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {error && (
                 <div className="text-red-500 text-center">{error}</div>
               )}
-
-              <button
-                onClick={createOrJoinRoom}
-                className="w-full bg-emerald-600 text-white py-3 rounded-lg hover:bg-emerald-700 transition-colors flex items-center justify-center space-x-2"
-              >
-                <Users className="w-5 h-5" />
-                <span>{roomId ? 'Join Room' : 'Create Room'}</span>
-              </button>
             </div>
           ) : (
             <div className="bg-white p-8 rounded-xl shadow-lg">
