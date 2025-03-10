@@ -3,6 +3,8 @@ export interface User {
   gender: string;
   kabulCount?: number;
   hasCompleted?: boolean;
+  wali?: string;
+  mehr?: number;
 }
 
 export interface Message {
@@ -13,10 +15,19 @@ export interface Message {
   timestamp: number;
 }
 
+export interface Witness {
+  id: string;
+  name: string;
+  timestamp: number;
+}
+
 export interface Room {
   id: string;
   users: Record<string, User>;
   witnessCount: number;
   isCompleted?: boolean;
   messages?: Record<string, Message>;
+  witnesses?: Record<string, Witness>;
+  marriageDate?: number;
+  location?: string;
 }

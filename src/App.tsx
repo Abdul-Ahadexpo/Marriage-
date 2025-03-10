@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { database } from './firebase';
-import { ref, onValue, set, get, push } from 'firebase/database';
+import { ref, onValue, set, get, push, remove } from 'firebase/database';
 import { v4 as uuidv4 } from 'uuid';
-import { Heart, Users, Eye, Star, Send } from 'lucide-react';
-import type { Room, User, Message } from './types';
+import { Heart, Users, Eye, Star, Send, LogOut, Download } from 'lucide-react';
+import type { Room, User, Message, Witness } from './types';
+import { MarriageCertificate } from './components/MarriageCertificate';
 
 function App() {
   const [roomId, setRoomId] = useState('');
@@ -14,8 +15,12 @@ function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [error, setError] = useState('');
   const [showCongrats, setShowCongrats] = useState(false);
+  const [showCertificate, setShowCertificate] = useState(false);
   const [message, setMessage] = useState('');
   const [userId, setUserId] = useState('');
+  const [wali, setWali] = useState('');
+  const [mehr, setMehr] = useState<number>(0);
+  const [location, setLocation] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -33,20 +38,22 @@ function App() {
         console.log('Room data update:', data);
         if (data) {
           setRoom(data);
-          // Check if both users have completed their Kabul and there are enough witnesses
+          if (!data.marriageDate) {
+            set(ref(database, `rooms/${roomId}/marriageDate`), Date.now());
+          }
           const users = Object.values(data.users);
           if (users.length === 2 && 
               users.every(user => user.kabulCount === 3) && 
               data.witnessCount >= 2) {
             setShowCongrats(true);
-            // Mark room as completed
-            set(ref(database, `rooms/${roomId}/isCompleted`), true)
-              .catch(error => {
-                console.error('Error marking room as completed:', error);
-              });
+            set(ref(database, `rooms/${roomId}/isCompleted`), true);
           }
         } else {
           console.log('No data found for room:', roomId);
+          if (roomId) {
+            setRoomId('');
+            setError('Room no longer exists');
+          }
         }
       }, (error) => {
         console.error('Error subscribing to room updates:', error);
@@ -67,6 +74,11 @@ function App() {
         return;
       }
 
+      if (role === 'participant' && !wali) {
+        setError('Please enter your Wali (guardian) name');
+        return;
+      }
+
       if (role === 'participant') {
         const newRoomId = uuidv4();
         console.log('Creating new room:', newRoomId);
@@ -74,14 +86,23 @@ function App() {
         const newUserId = uuidv4();
         setUserId(newUserId);
 
-        const newUser: User = { name, gender, kabulCount: 0 };
-        const newRoom = {
+        const newUser: User = { 
+          name, 
+          gender, 
+          kabulCount: 0,
+          wali,
+          mehr 
+        };
+        
+        const newRoom: Room = {
           id: newRoomId,
           users: {
             [newUserId]: newUser
           },
           witnessCount: 0,
-          messages: {}
+          messages: {},
+          witnesses: {},
+          location
         };
 
         const roomRef = ref(database, `rooms/${newRoomId}`);
@@ -105,6 +126,11 @@ function App() {
         return;
       }
 
+      if (role === 'participant' && !wali) {
+        setError('Please enter your Wali (guardian) name');
+        return;
+      }
+
       console.log('Attempting to join room:', joinRoomId);
       const roomRef = ref(database, `rooms/${joinRoomId}`);
       const snapshot = await get(roomRef);
@@ -118,6 +144,12 @@ function App() {
 
       if (role === 'witness') {
         console.log('Joining as witness');
+        const witness: Witness = {
+          id: uuidv4(),
+          name,
+          timestamp: Date.now()
+        };
+        await set(ref(database, `rooms/${joinRoomId}/witnesses/${witness.id}`), witness);
         await set(ref(database, `rooms/${joinRoomId}/witnessCount`), (currentRoom.witnessCount || 0) + 1);
         const newUserId = uuidv4();
         setUserId(newUserId);
@@ -136,7 +168,14 @@ function App() {
       const newUserId = uuidv4();
       setUserId(newUserId);
 
-      const newUser: User = { name, gender, kabulCount: 0 };
+      const newUser: User = { 
+        name, 
+        gender, 
+        kabulCount: 0,
+        wali,
+        mehr 
+      };
+      
       const updatedRoom = {
         ...currentRoom,
         users: {
@@ -152,6 +191,31 @@ function App() {
     } catch (error) {
       console.error('Error joining room:', error);
       setError('Failed to join room: ' + (error as Error).message);
+    }
+  };
+
+  const leaveRoom = async () => {
+    if (!roomId || !room) return;
+
+    try {
+      if (role === 'witness') {
+        await set(ref(database, `rooms/${roomId}/witnessCount`), room.witnessCount - 1);
+        if (userId && room.witnesses) {
+          await remove(ref(database, `rooms/${roomId}/witnesses/${userId}`));
+        }
+      } else if (userId && room.users[userId]) {
+        await remove(ref(database, `rooms/${roomId}/users/${userId}`));
+        const remainingUsers = Object.keys(room.users).length - 1;
+        if (remainingUsers === 0) {
+          await remove(ref(database, `rooms/${roomId}`));
+        }
+      }
+      setRoomId('');
+      setUserId('');
+      setError('');
+    } catch (error) {
+      console.error('Error leaving room:', error);
+      setError('Failed to leave room: ' + (error as Error).message);
     }
   };
 
@@ -202,18 +266,20 @@ function App() {
     const users = Object.entries(room.users);
     if (users.length !== 2) return null;
 
-    const [user1Id, user1] = users[0];
-    const [user2Id, user2] = users[1];
-
     return (
       <div className="space-y-8 text-center">
         <div className="text-2xl font-semibold text-gray-800 leading-relaxed px-4">
-          <div className="mb-4">بِسْمِ ٱللَّٰهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</div>
+          <div className="mb-4 font-arabic">بِسْمِ ٱللَّٰهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</div>
           {users.map(([currentUserId, currentUser]) => (
             <div key={currentUserId} className="mb-4">
               Do you {currentUser.name} accept {
                 users.find(([id]) => id !== currentUserId)?.[1].name
               } as your lawful spouse in accordance with Islamic law?
+              {currentUser.mehr !== undefined && (
+                <div className="text-sm text-gray-600 mt-1">
+                  With agreed Mehr of {currentUser.mehr} units
+                </div>
+              )}
             </div>
           ))}
           <div className="text-lg text-gray-600 mt-2">
@@ -229,7 +295,14 @@ function App() {
         <div className="flex flex-col md:flex-row justify-center md:space-x-8 space-y-4 md:space-y-0">
           {users.map(([currentUserId, user]) => (
             <div key={currentUserId} className="text-center">
-              <div className="mb-2">{user.name}</div>
+              <div className="mb-2">
+                {user.name}
+                {user.wali && (
+                  <div className="text-sm text-gray-600">
+                    Wali: {user.wali}
+                  </div>
+                )}
+              </div>
               <div className="mb-2">
                 {Array(3).fill(0).map((_, i) => (
                   <Star
@@ -317,14 +390,33 @@ function App() {
                 <p className="text-xl text-gray-700 mb-6">
                   May Allah bless this union and grant you both happiness and prosperity in your marriage.
                 </p>
-                <button
-                  onClick={() => setShowCongrats(false)}
-                  className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
-                >
-                  Close
-                </button>
+                <div className="flex justify-center space-x-4">
+                  <button
+                    onClick={() => setShowCongrats(false)}
+                    className="px-6 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowCongrats(false);
+                      setShowCertificate(true);
+                    }}
+                    className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors flex items-center"
+                  >
+                    <Download className="w-5 h-5 mr-2" />
+                    Get Certificate
+                  </button>
+                </div>
               </div>
             </div>
+          )}
+
+          {showCertificate && room && (
+            <MarriageCertificate
+              room={room}
+              onClose={() => setShowCertificate(false)}
+            />
           )}
 
           {!roomId ? (
@@ -354,6 +446,32 @@ function App() {
                   <option value="participant">Participant</option>
                   <option value="witness">Witness</option>
                 </select>
+
+                {role === 'participant' && (
+                  <>
+                    <input
+                      type="text"
+                      placeholder="Enter Wali (guardian) name"
+                      value={wali}
+                      onChange={(e) => setWali(e.target.value)}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Enter Mehr amount"
+                      value={mehr || ''}
+                      onChange={(e) => setMehr(parseInt(e.target.value) || 0)}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Enter Location (optional)"
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                    />
+                  </>
+                )}
 
                 <div className="flex flex-col md:flex-row gap-4">
                   <div className="flex-1">
@@ -390,11 +508,20 @@ function App() {
             </div>
           ) : (
             <div className="bg-white p-4 md:p-8 rounded-xl shadow-lg">
-              <div className="mb-6">
-                <div className="text-sm text-gray-500 mb-2">Room ID:</div>
-                <div className="bg-gray-100 p-3 rounded-lg text-gray-700 font-mono break-all">
-                  {roomId}
+              <div className="flex justify-between items-center mb-6">
+                <div className="flex-1">
+                  <div className="text-sm text-gray-500 mb-2">Room ID:</div>
+                  <div className="bg-gray-100 p-3 rounded-lg text-gray-700 font-mono break-all">
+                    {roomId}
+                  </div>
                 </div>
+                <button
+                  onClick={leaveRoom}
+                  className="ml-4 p-2 text-gray-600 hover:text-red-600 transition-colors"
+                  title="Leave Room"
+                >
+                  <LogOut className="w-6 h-6" />
+                </button>
               </div>
 
               {room && Object.keys(room.users || {}).length < 2 && role !== 'witness' && (
@@ -404,6 +531,18 @@ function App() {
               )}
 
               {renderNikahScreen()}
+
+              {room?.isCompleted && (
+                <div className="mt-6 flex justify-center">
+                  <button
+                    onClick={() => setShowCertificate(true)}
+                    className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors flex items-center"
+                  >
+                    <Download className="w-5 h-5 mr-2" />
+                    View Certificate
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
