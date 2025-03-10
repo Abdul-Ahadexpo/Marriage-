@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { database } from './firebase';
-import { ref, onValue, set, get } from 'firebase/database';
+import { ref, onValue, set, get, push } from 'firebase/database';
 import { v4 as uuidv4 } from 'uuid';
-import { Heart, Users, Eye, Star } from 'lucide-react';
-import type { Room, User } from './types';
+import { Heart, Users, Eye, Star, Send } from 'lucide-react';
+import type { Room, User, Message } from './types';
 
 function App() {
   const [roomId, setRoomId] = useState('');
@@ -14,6 +14,15 @@ function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [error, setError] = useState('');
   const [showCongrats, setShowCongrats] = useState(false);
+  const [message, setMessage] = useState('');
+  const [userId, setUserId] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [room?.messages]);
 
   useEffect(() => {
     if (roomId) {
@@ -24,9 +33,11 @@ function App() {
         console.log('Room data update:', data);
         if (data) {
           setRoom(data);
-          // Check if both users have completed their Kabul
+          // Check if both users have completed their Kabul and there are enough witnesses
           const users = Object.values(data.users);
-          if (users.length === 2 && users.every(user => user.kabulCount === 3)) {
+          if (users.length === 2 && 
+              users.every(user => user.kabulCount === 3) && 
+              data.witnessCount >= 2) {
             setShowCongrats(true);
             // Mark room as completed
             set(ref(database, `rooms/${roomId}/isCompleted`), true)
@@ -56,23 +67,31 @@ function App() {
         return;
       }
 
-      const newRoomId = uuidv4();
-      console.log('Creating new room:', newRoomId);
+      if (role === 'participant') {
+        const newRoomId = uuidv4();
+        console.log('Creating new room:', newRoomId);
 
-      const newUser: User = { name, gender, kabulCount: 0 };
-      const newRoom = {
-        id: newRoomId,
-        users: {
-          [uuidv4()]: newUser
-        },
-        witnessCount: 0
-      };
+        const newUserId = uuidv4();
+        setUserId(newUserId);
 
-      const roomRef = ref(database, `rooms/${newRoomId}`);
-      await set(roomRef, newRoom);
-      console.log('Room created successfully:', newRoomId);
-      setRoomId(newRoomId);
-      setError('');
+        const newUser: User = { name, gender, kabulCount: 0 };
+        const newRoom = {
+          id: newRoomId,
+          users: {
+            [newUserId]: newUser
+          },
+          witnessCount: 0,
+          messages: {}
+        };
+
+        const roomRef = ref(database, `rooms/${newRoomId}`);
+        await set(roomRef, newRoom);
+        console.log('Room created successfully:', newRoomId);
+        setRoomId(newRoomId);
+        setError('');
+      } else {
+        setError('Witnesses cannot create rooms');
+      }
     } catch (error) {
       console.error('Error creating room:', error);
       setError('Failed to create room: ' + (error as Error).message);
@@ -100,23 +119,29 @@ function App() {
       if (role === 'witness') {
         console.log('Joining as witness');
         await set(ref(database, `rooms/${joinRoomId}/witnessCount`), (currentRoom.witnessCount || 0) + 1);
+        const newUserId = uuidv4();
+        setUserId(newUserId);
         setRoomId(joinRoomId);
         setError('');
         return;
       }
 
-      if (Object.keys(currentRoom.users || {}).length >= 2) {
+      const participantCount = Object.keys(currentRoom.users || {}).length;
+      if (participantCount >= 2) {
         console.error('Room is full:', joinRoomId);
         setError('Room is full');
         return;
       }
+
+      const newUserId = uuidv4();
+      setUserId(newUserId);
 
       const newUser: User = { name, gender, kabulCount: 0 };
       const updatedRoom = {
         ...currentRoom,
         users: {
           ...currentRoom.users,
-          [uuidv4()]: newUser
+          [newUserId]: newUser
         }
       };
 
@@ -130,24 +155,45 @@ function App() {
     }
   };
 
-  const sayKabul = async (userId: string) => {
+  const sayKabul = async (clickedUserId: string) => {
     try {
-      if (!room || !roomId) {
-        console.error('No room data available');
+      if (!room || !roomId || clickedUserId !== userId) {
+        console.error('Cannot say Kabul for other users');
         return;
       }
       
-      console.log('Saying Kabul for user:', userId);
-      const currentCount = room.users[userId].kabulCount || 0;
-      const userRef = ref(database, `rooms/${roomId}/users/${userId}`);
+      console.log('Saying Kabul for user:', clickedUserId);
+      const currentCount = room.users[clickedUserId].kabulCount || 0;
+      const userRef = ref(database, `rooms/${roomId}/users/${clickedUserId}`);
       await set(userRef, {
-        ...room.users[userId],
+        ...room.users[clickedUserId],
         kabulCount: currentCount + 1
       });
       console.log('Kabul count updated successfully');
     } catch (error) {
       console.error('Error updating Kabul count:', error);
       setError('Failed to update Kabul: ' + (error as Error).message);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!message.trim() || !roomId || !userId) return;
+
+    try {
+      const newMessage: Message = {
+        id: uuidv4(),
+        userId,
+        userName: name,
+        text: message.trim(),
+        timestamp: Date.now()
+      };
+
+      const messagesRef = ref(database, `rooms/${roomId}/messages`);
+      await push(messagesRef, newMessage);
+      setMessage('');
+    } catch (error) {
+      console.error('Error sending message:', error);
+      setError('Failed to send message: ' + (error as Error).message);
     }
   };
 
@@ -161,17 +207,28 @@ function App() {
 
     return (
       <div className="space-y-8 text-center">
-        <div className="text-2xl font-semibold text-gray-800 leading-relaxed">
+        <div className="text-2xl font-semibold text-gray-800 leading-relaxed px-4">
           <div className="mb-4">بِسْمِ ٱللَّٰهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</div>
-          <div>Do you {user1.name} accept {user2.name} as your lawful spouse in accordance with Islamic law?</div>
+          {users.map(([currentUserId, currentUser]) => (
+            <div key={currentUserId} className="mb-4">
+              Do you {currentUser.name} accept {
+                users.find(([id]) => id !== currentUserId)?.[1].name
+              } as your lawful spouse in accordance with Islamic law?
+            </div>
+          ))}
           <div className="text-lg text-gray-600 mt-2">
             Say "Kabul" three times to accept
           </div>
+          {room.witnessCount < 2 && (
+            <div className="text-red-500 text-sm mt-2">
+              At least 2 witnesses are required for the nikah to be valid
+            </div>
+          )}
         </div>
 
-        <div className="flex justify-center space-x-8">
-          {users.map(([userId, user]) => (
-            <div key={userId} className="text-center">
+        <div className="flex flex-col md:flex-row justify-center md:space-x-8 space-y-4 md:space-y-0">
+          {users.map(([currentUserId, user]) => (
+            <div key={currentUserId} className="text-center">
               <div className="mb-2">{user.name}</div>
               <div className="mb-2">
                 {Array(3).fill(0).map((_, i) => (
@@ -184,12 +241,14 @@ function App() {
                 ))}
               </div>
               <button
-                onClick={() => sayKabul(userId)}
-                disabled={user.kabulCount === 3}
+                onClick={() => sayKabul(currentUserId)}
+                disabled={user.kabulCount === 3 || currentUserId !== userId}
                 className={`px-6 py-3 rounded-lg ${
                   user.kabulCount === 3
                     ? 'bg-green-500 text-white'
-                    : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    : currentUserId === userId
+                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 } transition-colors`}
               >
                 {user.kabulCount === 3 ? 'Completed' : 'Say Kabul'}
@@ -201,6 +260,41 @@ function App() {
         <div className="mt-4 text-gray-600">
           <Eye className="inline-block w-5 h-5 mr-2" />
           {room.witnessCount} Witnesses Present
+        </div>
+
+        <div className="mt-8 border-t pt-4">
+          <div className="max-h-60 overflow-y-auto mb-4 space-y-2">
+            {room.messages && Object.values(room.messages).map((msg: Message) => (
+              <div
+                key={msg.id}
+                className={`p-2 rounded-lg ${
+                  msg.userId === userId
+                    ? 'bg-emerald-100 ml-auto'
+                    : 'bg-gray-100'
+                } max-w-[80%] break-words`}
+              >
+                <div className="text-sm font-semibold">{msg.userName}</div>
+                <div>{msg.text}</div>
+              </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
+          <div className="flex space-x-2">
+            <input
+              type="text"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+              placeholder="Type a message..."
+              className="flex-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+            />
+            <button
+              onClick={sendMessage}
+              className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -217,8 +311,8 @@ function App() {
           </div>
 
           {showCongrats && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-              <div className="bg-white p-8 rounded-xl shadow-lg text-center max-w-md mx-4">
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white p-8 rounded-xl shadow-lg text-center max-w-md w-full">
                 <h2 className="text-3xl font-bold text-emerald-600 mb-4">Congratulations!</h2>
                 <p className="text-xl text-gray-700 mb-6">
                   May Allah bless this union and grant you both happiness and prosperity in your marriage.
@@ -261,7 +355,7 @@ function App() {
                   <option value="witness">Witness</option>
                 </select>
 
-                <div className="flex gap-4">
+                <div className="flex flex-col md:flex-row gap-4">
                   <div className="flex-1">
                     <button
                       onClick={createRoom}
@@ -271,13 +365,13 @@ function App() {
                       <span>Create New Room</span>
                     </button>
                   </div>
-                  <div className="flex-1">
+                  <div className="flex-1 space-y-2">
                     <input
                       type="text"
                       placeholder="Enter room ID to join"
                       value={joinRoomId}
                       onChange={(e) => setJoinRoomId(e.target.value)}
-                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent mb-2"
+                      className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
                     />
                     <button
                       onClick={joinRoom}
@@ -295,10 +389,10 @@ function App() {
               )}
             </div>
           ) : (
-            <div className="bg-white p-8 rounded-xl shadow-lg">
+            <div className="bg-white p-4 md:p-8 rounded-xl shadow-lg">
               <div className="mb-6">
                 <div className="text-sm text-gray-500 mb-2">Room ID:</div>
-                <div className="bg-gray-100 p-3 rounded-lg text-gray-700 font-mono">
+                <div className="bg-gray-100 p-3 rounded-lg text-gray-700 font-mono break-all">
                   {roomId}
                 </div>
               </div>
